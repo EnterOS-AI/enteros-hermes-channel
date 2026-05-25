@@ -29,6 +29,8 @@ import asyncio
 import json
 import logging
 import os
+import mimetypes
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -72,6 +74,58 @@ PLUGIN_NAME = "molecule"
 _LONG_POLL_SECS = 20
 
 
+def _normalise_attachments(metadata: Optional[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    if not metadata:
+        return []
+
+    raw = metadata.get("attachments")
+    if raw is None:
+        raw = metadata.get("files")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return []
+
+    out: list[Dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, str):
+            if not item:
+                continue
+            out.append({"path": item})
+            continue
+        elif isinstance(item, dict):
+            path = item.get("path") or item.get("file_path")
+            uri = item.get("uri")
+            name = item.get("name") or item.get("filename") or item.get("file_name")
+            if isinstance(path, str) and path and not isinstance(uri, str):
+                att = {"path": path}
+                if isinstance(name, str) and name:
+                    att["name"] = name
+                out.append(att)
+                continue
+            if not isinstance(uri, str) or not uri:
+                continue
+            if not isinstance(name, str) or not name:
+                name = Path(uri.replace("workspace:", "")).name
+            if not name:
+                continue
+            att = {"uri": uri, "name": name}
+            mime_type = item.get("mimeType") or item.get("mime_type")
+            if isinstance(mime_type, str) and mime_type:
+                att["mimeType"] = mime_type
+            size = item.get("size")
+            if isinstance(size, (int, float)) and size > 0:
+                att["size"] = int(size)
+        else:
+            continue
+
+        if "mimeType" not in att:
+            guessed, _ = mimetypes.guess_type(att["name"])
+            if guessed:
+                att["mimeType"] = guessed
+        out.append(att)
+
+    return out
 def _resolve_python() -> str:
     """Return the python interpreter that can ``import molecule_runtime``.
 
@@ -330,9 +384,11 @@ class MoleculeAdapter(BasePlatformAdapter):
         kind, target = self._decode_chat_id(chat_id)
         try:
             if kind == "canvas":
-                payload = await self._call_tool(
-                    "send_message_to_user", {"message": content}
-                )
+                args: Dict[str, Any] = {"message": content}
+                attachments = _normalise_attachments(metadata)
+                if attachments:
+                    args["attachments"] = attachments
+                payload = await self._call_tool("send_message_to_user", args)
             elif kind == "peer":
                 payload = await self._call_tool(
                     "delegate_task",
