@@ -348,6 +348,60 @@ async def test_send_canvas_routes_to_send_message_to_user(monkeypatch, fake_mcp_
 
 
 @pytest.mark.asyncio
+async def test_send_canvas_forwards_attachment_metadata(monkeypatch, fake_mcp_script):
+    a = _make_adapter(monkeypatch, fake_mcp_script)
+    try:
+        assert await a.connect()
+        result = await a.send(
+            "canvas:ws-test-1234",
+            "see attached",
+            metadata={
+                "attachments": [
+                    {
+                        "uri": "workspace:/workspace/org_chart_v2.png",
+                        "name": "org_chart_v2.png",
+                        "mimeType": "image/png",
+                        "size": 12345,
+                    }
+                ]
+            },
+        )
+        assert result.success is True
+        assert result.raw_response["args"] == {
+            "message": "see attached",
+            "attachments": [
+                {
+                    "uri": "workspace:/workspace/org_chart_v2.png",
+                    "name": "org_chart_v2.png",
+                    "mimeType": "image/png",
+                    "size": 12345,
+                }
+            ],
+        }
+    finally:
+        await a.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_canvas_forwards_local_attachment_paths(monkeypatch, fake_mcp_script):
+    a = _make_adapter(monkeypatch, fake_mcp_script)
+    try:
+        assert await a.connect()
+        result = await a.send(
+            "canvas:ws-test-1234",
+            "see attached",
+            metadata={"attachments": ["/workspace/org_chart_v2.png"]},
+        )
+        assert result.success is True
+        assert result.raw_response["args"] == {
+            "message": "see attached",
+            "attachments": [{"path": "/workspace/org_chart_v2.png"}],
+        }
+    finally:
+        await a.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_send_peer_routes_to_delegate_task(monkeypatch, fake_mcp_script):
     monkeypatch.setenv(
         "FAKE_TOOL_DELEGATE_TASK",
