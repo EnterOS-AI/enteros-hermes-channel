@@ -34,11 +34,15 @@ def register(ctx) -> None:
             label="Molecule",
             adapter_factory=lambda cfg: MoleculeAdapter(cfg),
             check_fn=check_molecule_requirements,
-            required_env=["MOLECULE_WORKSPACE_ID", "MOLECULE_PLATFORM_URL"],
+            required_env=[
+                "MOLECULE_WORKSPACE_ID",
+                "MOLECULE_WORKSPACE_TOKEN",
+                "MOLECULE_PLATFORM_URL",
+            ],
             install_hint=(
                 "set MOLECULE_WORKSPACE_ID, MOLECULE_WORKSPACE_TOKEN, "
-                "MOLECULE_PLATFORM_URL, MOLECULE_ORG_ID; ensure "
-                "molecule-ai-workspace-runtime is on the python that "
+                "and MOLECULE_PLATFORM_URL; ensure "
+                "molecules-workspace-runtime>=0.4.4 is on the python that "
                 "MOLECULE_MCP_PYTHON resolves to"
             ),
         )

@@ -4,6 +4,7 @@ description: "Molecule channel for hermes — connects to the molecule platform 
 author: "Molecule AI"
 requires_env:
   - MOLECULE_WORKSPACE_ID
+  - MOLECULE_WORKSPACE_TOKEN
   - MOLECULE_PLATFORM_URL
 provides_tools: []
 provides_hooks: []
