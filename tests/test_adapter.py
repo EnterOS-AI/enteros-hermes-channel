@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import textwrap
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -45,7 +48,7 @@ def _load_adapter_module():
 
     from dataclasses import dataclass, field
     from enum import Enum
-    from typing import Optional, List, Dict, Any as TAny
+    from typing import Optional, List, Any as TAny
     from datetime import datetime
 
     class Platform(Enum):
@@ -247,17 +250,117 @@ def _make_adapter(monkeypatch, fake_mcp_script: Path, *, env_extra: dict | None 
     a = adapter_mod.MoleculeAdapter(cfg)
 
     # Override the spawn target to point at our fake script instead of
-    # the `-m molecule_runtime.a2a_mcp_server` module.
+    # the `-m molecule_runtime.mcp_cli` module.
     real_create_subprocess_exec = asyncio.create_subprocess_exec
 
     async def fake_spawn(*args, **kwargs):
-        # Replace the trailing `-m molecule_runtime.a2a_mcp_server` args
+        # Replace the trailing `-m molecule_runtime.mcp_cli` args
         # with the path to the fake script.
         new_args = (args[0], str(fake_mcp_script))
         return await real_create_subprocess_exec(*new_args, **kwargs)
 
     monkeypatch.setattr(adapter_mod.asyncio, "create_subprocess_exec", fake_spawn)
     return a
+
+
+@pytest.fixture
+def fake_platform_http():
+    """Local platform boundary used by the real-runtime startup test."""
+
+    class State:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.calls: list[dict[str, Any]] = []
+            self.message_sent = False
+
+        def record(self, handler, method: str) -> None:
+            parsed = urlparse(handler.path)
+            with self.lock:
+                self.calls.append(
+                    {
+                        "method": method,
+                        "path": parsed.path,
+                        "query": parse_qs(parsed.query),
+                        # Keep credentials out of assertion output. These
+                        # booleans still prove the real runtime authenticated
+                        # every platform lifecycle request.
+                        "auth_ok": handler.headers.get("Authorization")
+                        == "Bearer test-workspace-credential",
+                        "origin_ok": handler.headers.get("Origin")
+                        == base_url,
+                    }
+                )
+
+        def snapshot(self) -> list[dict[str, Any]]:
+            with self.lock:
+                return list(self.calls)
+
+    state = State()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, _format, *_args) -> None:
+            return
+
+        def _json(self, payload: Any, status: int = 200) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+            state.record(self, "POST")
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self._json({"ok": True, "platform_inbound_secret": "test-inbound"})
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+            state.record(self, "GET")
+            parsed = urlparse(self.path)
+            if parsed.path == "/workspaces/ws-real-runtime/activity":
+                with state.lock:
+                    first = not state.message_sent
+                    state.message_sent = True
+                if first:
+                    self._json(
+                        [
+                            {
+                                "id": "activity-real-1",
+                                "source_id": "",
+                                "method": "message/send",
+                                "created_at": "2026-07-14T00:00:00Z",
+                                "request_body": {
+                                    "params": {
+                                        "message": {
+                                            "parts": [
+                                                {
+                                                    "kind": "text",
+                                                    "text": "real runtime inbound",
+                                                }
+                                            ]
+                                        }
+                                    }
+                                },
+                            }
+                        ]
+                    )
+                    return
+                self._json([])
+                return
+            self._json({"error": "not found"}, status=404)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield base_url, state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 # ----------------------------------------------------------------------
@@ -279,6 +382,87 @@ async def test_connect_completes_handshake_and_starts_loops(monkeypatch, fake_mc
 
 
 @pytest.mark.asyncio
+async def test_real_runtime_entrypoint_starts_external_lifecycle_and_inbox(
+    monkeypatch, tmp_path, fake_platform_http, caplog
+):
+    """The channel must launch the standalone runtime, not its bare MCP loop.
+
+    Runtime 0.4.4's mcp_cli path registers the external workspace, starts a
+    heartbeat, starts the activity poller, then serves MCP over stdio. A fake
+    JSON-RPC subprocess cannot prove any of those platform-boundary effects.
+    """
+    assert tuple(int(part) for part in version("molecules-workspace-runtime").split(".")[:3]) >= (
+        0,
+        4,
+        4,
+    )
+
+    base_url, state = fake_platform_http
+    home = tmp_path / "home"
+    mailbox = tmp_path / "mailbox"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("MOLECULE_MAILBOX_DIR", str(mailbox))
+    monkeypatch.delenv("CONFIGS_DIR", raising=False)
+    monkeypatch.delenv("MOLECULE_CONFIGS_DIR", raising=False)
+    monkeypatch.setenv("MOLECULE_WORKSPACE_ID", "ws-real-runtime")
+    monkeypatch.setenv("MOLECULE_WORKSPACE_TOKEN", "test-workspace-credential")
+    monkeypatch.setenv("MOLECULE_PLATFORM_URL", base_url)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.delenv("MOLECULE_MCP_DISABLE_HEARTBEAT", raising=False)
+    monkeypatch.delenv("MOLECULE_MCP_DISABLE_INBOX", raising=False)
+    monkeypatch.setattr(adapter_mod, "_resolve_python", lambda: sys.executable)
+    caplog.set_level("INFO", logger=adapter_mod.logger.name)
+
+    cfg = type("Cfg", (), {"extra": {}, "enabled": True})()
+    adapter = adapter_mod.MoleculeAdapter(cfg)
+    try:
+        assert await adapter.connect()
+        for _ in range(200):
+            calls = state.snapshot()
+            paths = {(call["method"], call["path"]) for call in calls}
+            if (
+                ("POST", "/registry/register") in paths
+                and ("POST", "/registry/heartbeat") in paths
+                and ("GET", "/workspaces/ws-real-runtime/activity") in paths
+                and adapter.handled
+            ):
+                break
+            await asyncio.sleep(0.05)
+
+        calls = state.snapshot()
+        paths = {(call["method"], call["path"]) for call in calls}
+        assert ("POST", "/registry/register") in paths
+        assert ("POST", "/registry/heartbeat") in paths
+        assert ("GET", "/workspaces/ws-real-runtime/activity") in paths
+        lifecycle_calls = [
+            call
+            for call in calls
+            if call["path"]
+            in {
+                "/registry/register",
+                "/registry/heartbeat",
+                "/workspaces/ws-real-runtime/activity",
+            }
+        ]
+        assert lifecycle_calls
+        assert all(call["auth_ok"] and call["origin_ok"] for call in lifecycle_calls)
+
+        poll = next(
+            call
+            for call in lifecycle_calls
+            if call["path"] == "/workspaces/ws-real-runtime/activity"
+        )
+        assert poll["query"]["type"] == ["a2a_receive"]
+        assert poll["query"]["include"] == ["peer_info"]
+        assert len(adapter.handled) == 1
+        assert adapter.handled[0].text == "real runtime inbound"
+        assert "MCP initialize ok (server=molecule)" in caplog.text
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_subprocess_env_includes_workspace_token(monkeypatch, fake_mcp_script, tmp_path):
     """Regression: MOLECULE_WORKSPACE_TOKEN must reach the spawned MCP
     subprocess. molecule_runtime.platform_auth.get_token reads it for
@@ -291,7 +475,7 @@ async def test_subprocess_env_includes_workspace_token(monkeypatch, fake_mcp_scr
         monkeypatch,
         fake_mcp_script,
         env_extra={
-            "MOLECULE_WORKSPACE_TOKEN": "tok-abc-XYZ-123",
+            "MOLECULE_WORKSPACE_TOKEN": "test-only",
             "FAKE_ENV_DUMP": str(env_dump),
         },
     )
@@ -302,7 +486,7 @@ async def test_subprocess_env_includes_workspace_token(monkeypatch, fake_mcp_scr
         # Exact-equality on the token. Substring-in-repr would pass
         # whether the var was passed through OR whether something else
         # leaked the literal text.
-        assert captured.get("MOLECULE_WORKSPACE_TOKEN") == "tok-abc-XYZ-123"
+        assert captured.get("MOLECULE_WORKSPACE_TOKEN") == "test-only"
         # And confirm the canonical runtime env vars are also present.
         assert captured.get("WORKSPACE_ID") == "ws-test-1234"
         assert captured.get("PLATFORM_URL") == "http://platform:8080"
@@ -312,10 +496,11 @@ async def test_subprocess_env_includes_workspace_token(monkeypatch, fake_mcp_scr
 
 @pytest.mark.asyncio
 async def test_subprocess_env_omits_workspace_token_when_unset(monkeypatch, fake_mcp_script, tmp_path):
-    """When MOLECULE_WORKSPACE_TOKEN isn't set in hermes's env we don't
-    fabricate one for the subprocess — the runtime then falls back to
-    /configs/.auth_token (in-container path) or sends headers without
-    Authorization (which the platform handles as anonymous heartbeat).
+    """Low-level env construction never fabricates a workspace credential.
+
+    The supported gateway path rejects this configuration in
+    check_molecule_requirements before adapter creation. This direct adapter
+    test keeps the lower-level invariant explicit as defense in depth.
     """
     monkeypatch.delenv("MOLECULE_WORKSPACE_TOKEN", raising=False)
     env_dump = tmp_path / "env-dump.json"
@@ -555,3 +740,38 @@ def test_extract_tool_payload_falls_back_to_text():
 def test_check_molecule_requirements_missing_workspace_id(monkeypatch):
     monkeypatch.delenv("MOLECULE_WORKSPACE_ID", raising=False)
     assert adapter_mod.check_molecule_requirements() is False
+
+
+def test_check_molecule_requirements_missing_workspace_token(monkeypatch):
+    monkeypatch.setenv("MOLECULE_WORKSPACE_ID", "ws-test")
+    monkeypatch.setenv("MOLECULE_PLATFORM_URL", "https://tenant.example")
+    monkeypatch.delenv("MOLECULE_WORKSPACE_TOKEN", raising=False)
+    assert adapter_mod.check_molecule_requirements() is False
+
+
+def test_check_molecule_requirements_missing_platform_url(monkeypatch):
+    monkeypatch.setenv("MOLECULE_WORKSPACE_ID", "ws-test")
+    monkeypatch.setenv("MOLECULE_WORKSPACE_TOKEN", "test-workspace-credential")
+    monkeypatch.delenv("MOLECULE_PLATFORM_URL", raising=False)
+    assert adapter_mod.check_molecule_requirements() is False
+
+
+def test_register_platform_install_hint_uses_canonical_runtime_distribution():
+    """The gateway's actionable failure hint must not name the retired dist."""
+    import hermes_channel_molecule
+
+    captured = {}
+
+    class Context:
+        def register_platform(self, **kwargs):
+            captured.update(kwargs)
+
+    hermes_channel_molecule.register(Context())
+
+    assert captured["required_env"] == [
+        "MOLECULE_WORKSPACE_ID",
+        "MOLECULE_WORKSPACE_TOKEN",
+        "MOLECULE_PLATFORM_URL",
+    ]
+    assert "molecules-workspace-runtime" in captured["install_hint"]
+    assert "molecule-ai-workspace-runtime" not in captured["install_hint"]

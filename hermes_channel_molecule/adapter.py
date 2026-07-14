@@ -1,8 +1,8 @@
 """molecule-a2a hermes platform adapter.
 
-Connects hermes to the molecule platform via the molecule-runtime A2A MCP
-server. The MCP server is spawned as a subprocess on ``connect()``; we
-talk to it over stdio JSON-RPC.
+Connects hermes to the molecule platform via the molecule-runtime standalone
+MCP entry point. The subprocess registers and heartbeats the external
+workspace, polls its platform inbox, and serves MCP over stdio JSON-RPC.
 
 Inbound flow
 ------------
@@ -33,7 +33,6 @@ import mimetypes
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 from typing import Any, Dict, Optional
 
 from gateway.platforms.base import (
@@ -176,22 +175,25 @@ def check_molecule_requirements() -> bool:
     in-tree adapters. The gateway will skip adapter creation (with a
     warning) if this returns False.
     """
-    if not os.environ.get("MOLECULE_WORKSPACE_ID"):
+    if not os.environ.get("MOLECULE_WORKSPACE_ID", "").strip():
         logger.warning(
             "%s: MOLECULE_WORKSPACE_ID is not set; cannot connect", PLUGIN_NAME
         )
         return False
-    if not os.environ.get("MOLECULE_WORKSPACE_TOKEN"):
-        # Soft-warn rather than block: the runtime will fall back to
-        # /configs/.auth_token if present (in-container scenario where
-        # this plugin is unusual but not impossible). External runs —
-        # the common case — need the env var.
+    if not os.environ.get("MOLECULE_WORKSPACE_TOKEN", "").strip():
         logger.warning(
-            "%s: MOLECULE_WORKSPACE_TOKEN is not set; outbound platform "
-            "calls will be unauthenticated unless /configs/.auth_token "
-            "exists. Generate a token from the canvas → Tokens tab and "
-            "export MOLECULE_WORKSPACE_TOKEN=...", PLUGIN_NAME,
+            "%s: MOLECULE_WORKSPACE_TOKEN is not set; external Hermes "
+            "cannot authenticate. Copy the one-time credential from Canvas "
+            "Config → External Connection, or use Rotate credentials if the "
+            "saved value was lost",
+            PLUGIN_NAME,
         )
+        return False
+    if not os.environ.get("MOLECULE_PLATFORM_URL", "").strip():
+        logger.warning(
+            "%s: MOLECULE_PLATFORM_URL is not set; cannot connect", PLUGIN_NAME
+        )
+        return False
     python = _resolve_python()
     try:
         subprocess.run(
@@ -217,11 +219,13 @@ class MoleculeAdapter(BasePlatformAdapter):
         super().__init__(config, _platform_identity(PLUGIN_NAME))
 
         self._workspace_id = os.environ.get("MOLECULE_WORKSPACE_ID", "")
-        self._platform_url = os.environ.get(
-            "MOLECULE_PLATFORM_URL", "http://platform:8080"
-        )
+        self._platform_url = os.environ.get("MOLECULE_PLATFORM_URL", "").strip()
         self._org_id = os.environ.get("MOLECULE_ORG_ID", "")
-        self._configs_dir = os.environ.get("MOLECULE_CONFIGS_DIR", "/configs")
+        # Do not force /configs for an external Hermes process. The standalone
+        # runtime owns location resolution: writable /configs in a managed
+        # container, otherwise ~/.molecule-workspace. This wrapper variable is
+        # an explicit override only.
+        self._configs_dir = os.environ.get("MOLECULE_CONFIGS_DIR", "").strip()
         # Per-workspace platform credential. Inside a molecule-managed
         # container the runtime reads this from /configs/.auth_token (the
         # platform writes it on provision); external runtimes (this case)
@@ -266,7 +270,7 @@ class MoleculeAdapter(BasePlatformAdapter):
             self._proc = await asyncio.create_subprocess_exec(
                 self._python,
                 "-m",
-                "molecule_runtime.a2a_mcp_server",
+                "molecule_runtime.mcp_cli",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -275,7 +279,7 @@ class MoleculeAdapter(BasePlatformAdapter):
         except (OSError, FileNotFoundError) as exc:
             self._set_fatal_error(
                 "spawn_failed",
-                f"failed to spawn {self._python} -m molecule_runtime.a2a_mcp_server: {exc}",
+                f"failed to spawn {self._python} -m molecule_runtime.mcp_cli: {exc}",
                 retryable=False,
             )
             return False

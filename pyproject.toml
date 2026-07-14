@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Molecule AI" }]
 dependencies = [
-    "molecule-ai-workspace-runtime>=0.1",
+    "molecules-workspace-runtime>=0.4.4",
 ]
 
 [project.optional-dependencies]

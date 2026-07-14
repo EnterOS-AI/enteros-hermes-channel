@@ -1,117 +1,177 @@
 # hermes-channel-molecule
 
-Hermes platform plugin that connects an external [hermes-agent](https://github.com/dnakov/hermes-agent) to the [Molecule](https://moleculesai.app) platform via the molecule-runtime A2A MCP server.
+Hermes platform plugin that connects an external
+[hermes-agent](https://git.moleculesai.app/molecule-ai/hermes-agent) to the
+[Molecule](https://moleculesai.app) platform.
 
 ## What this is for
 
-You run hermes-agent on your own machine. You also have a Molecule workspace identity on the platform — peers can delegate tasks to you, the canvas chat can ping you. Without this plugin, those messages sit in your molecule inbox until you ask hermes "any messages for me?". With this plugin, hermes treats the Molecule channel like any other messaging platform (Telegram, Discord, Slack): inbound messages arrive as platform events and the agent replies through the same code path it uses for every other channel.
+Run this plugin when Hermes lives on your own machine but represents an
+external Molecule workspace. Canvas messages and peer delegations arrive as
+normal Hermes platform events, and replies go back through the same gateway
+path used by Telegram, Discord, and Slack.
 
-If your hermes runs *inside* a Molecule workspace container (rather than externally), use [hermes-platform-molecule-a2a](https://git.moleculesai.app/molecule-ai/hermes-platform-molecule-a2a) instead — that plugin uses the in-container HTTP callback path.
+If Hermes runs inside a Molecule workspace container, use
+[hermes-platform-molecule-a2a](https://git.moleculesai.app/molecule-ai/hermes-platform-molecule-a2a)
+instead. That integration uses the in-container callback path.
 
 ## Architecture
 
-```
-   hermes-agent (your machine)
-        │
-        │   stdio JSON-RPC
-        ▼
-   python -m molecule_runtime.a2a_mcp_server   (subprocess)
-        │
-        │   long-poll: wait_for_message
-        ▼
-   Molecule platform inbox
-        │
-        ├── canvas user typing in your workspace chat
-        └── peer agents sending A2A messages
+```text
+hermes-agent
+    |
+    | stdio JSON-RPC
+    v
+python -m molecule_runtime.mcp_cli
+    |-- register + heartbeat the external workspace
+    |-- poll the platform inbox
+    `-- expose Molecule MCP tools
+    |
+    v
+Molecule canvas messages and peer A2A tasks
 ```
 
-`MoleculeAdapter.connect()` spawns the molecule-runtime MCP server as a subprocess, completes the JSON-RPC `initialize` handshake, and starts a background long-poll loop that calls `wait_for_message`. When a message lands it's normalized into a hermes `MessageEvent` and dispatched via `handle_message()`. The agent's reply is routed back through `send_message_to_user` (canvas) or `delegate_task` (peer agent) MCP tool calls.
+`MoleculeAdapter.connect()` launches the standalone runtime entry point,
+completes the MCP `initialize` handshake, and calls `wait_for_message` in the
+background. The runtime entry point—not the bare in-container MCP module—is
+required because it owns external registration, heartbeat, and inbox polling.
 
 ## Install
 
-### Pip (recommended)
+`hermes-channel-molecule` is not published on public PyPI. The preferred path
+is the ready-to-paste **Hermes** block in Canvas under the workspace's
+**Config → External Connection** section. It pins reviewed versions and guards
+the gateway restart when installation or token disclosure is incomplete.
+
+For a manual install, download the private runtime wheel without dependencies,
+resolve that wheel's public dependencies only from PyPI, then install this
+plugin from canonical Gitea source:
 
 ```bash
-pip install hermes-channel-molecule
+set -euo pipefail
+runtime_download="$(mktemp -d)"
+trap 'rm -rf "$runtime_download"' EXIT
+
+python3 -m pip download --no-deps --dest "$runtime_download" \
+  --index-url https://git.moleculesai.app/api/packages/molecule-ai/pypi/simple/ \
+  molecules-workspace-runtime==0.4.4
+python3 -m pip install --index-url https://pypi.org/simple/ \
+  "$runtime_download"/molecules_workspace_runtime-*.whl
+python3 -m pip install --no-deps \
+  'git+https://git.moleculesai.app/molecule-ai/hermes-channel-molecule.git'
 ```
 
-The plugin loads via the `hermes_agent.plugins` entry point — no manual configuration of plugin directories needed.
+The split-index sequence is intentional: the private Gitea registry does not
+proxy public dependencies, while an unrestricted `--extra-index-url` would
+reintroduce dependency-confusion ambiguity for a private distribution.
 
-### Direct (no PyPI)
+The installed package exposes the `molecule` entry point in the
+`hermes_agent.plugins` group. Enable that pip plugin explicitly:
 
 ```bash
-git clone https://git.moleculesai.app/molecule-ai/hermes-channel-molecule.git
-cp -r hermes-channel-molecule/hermes_channel_molecule ~/.hermes/plugins/molecule
+hermes plugins enable molecule
 ```
-
-Hermes discovers any directory under `~/.hermes/plugins/` containing a `plugin.yaml` and an `__init__.py` with a `register(ctx)` function.
 
 ## Configure
 
-Add this to `~/.hermes/config.yaml`:
+The minimum explicit `~/.hermes/config.yaml` shape is:
 
 ```yaml
-gateway:
-  platforms:
-    molecule:
-      enabled: true
+plugins:
+  enabled:
+    - molecule
+
+platforms:
+  molecule:
+    enabled: true
 ```
 
-Set the required env vars (your workspace identity on the Molecule platform):
+`platforms.molecule` is a top-level public config key. Do not nest it under
+`gateway`, and do not use `plugin_platforms`; current Hermes does not parse
+either YAML shape.
+
+Get the workspace ID, tenant URL, and credential from Canvas under the
+workspace's **Config → External Connection** section. A newly minted token is
+shown only once. Re-opening the connection details deliberately omits the
+token while leaving the current credential active. If the saved value is lost,
+use **Rotate credentials** to revoke it and mint a replacement, then update the
+environment before restarting Hermes.
 
 ```bash
-export MOLECULE_WORKSPACE_ID=ws-...                          # from the platform
-export MOLECULE_WORKSPACE_TOKEN=tok-...                      # from canvas → Tokens tab
+export MOLECULE_WORKSPACE_ID=ws-...
 export MOLECULE_PLATFORM_URL=https://your-tenant.moleculesai.app
-export MOLECULE_ORG_ID=org-...                               # from the platform
+export MOLECULE_WORKSPACE_TOKEN=...
 ```
 
-`MOLECULE_WORKSPACE_TOKEN` is the per-workspace platform credential. Inside a molecule-managed container the runtime reads it from `/configs/.auth_token` (the platform writes it on provision). External runtimes — including hermes-on-your-laptop — have no `/configs` volume, so the token must come from the env. Without it every outbound platform call goes unauthenticated and gets 401'd.
+External Hermes runs must supply `MOLECULE_WORKSPACE_TOKEN`; they do not have
+the platform-managed `/configs/.auth_token` volume. Without a real token,
+registration and platform calls fail authentication.
 
-Optional:
+Optional overrides:
 
 ```bash
-export MOLECULE_CONFIGS_DIR=/configs                                 # default
-export MOLECULE_MCP_PYTHON=/opt/molecule-venv/bin/python3            # python that has molecule_runtime
+# Interpreter that contains molecule_runtime. Normally this is the Python
+# environment where Hermes and this plugin were installed.
+export MOLECULE_MCP_PYTHON=/path/to/venv/bin/python3
+
+# Runtime state directory. External runtime default: ~/.molecule-workspace.
+export MOLECULE_CONFIGS_DIR=/path/to/private/runtime-state
 ```
 
-Restart hermes:
+Only replace a running gateway after the install, config, and one-time token
+have been verified:
 
 ```bash
 hermes gateway --replace
 ```
 
-You should see in the gateway log:
+The gateway log should include:
 
+```text
+[molecule] MCP initialize ok (server=molecule)
 ```
-[molecule] MCP initialize ok (server=a2a-delegation)
+
+## Verify end to end
+
+First confirm Hermes sees the enabled entry-point plugin:
+
+```bash
+hermes plugins list
+python3 - <<'PY'
+from importlib.metadata import entry_points
+
+matches = list(entry_points(group="hermes_agent.plugins", name="molecule"))
+assert len(matches) == 1, matches
+assert matches[0].value == "hermes_channel_molecule", matches[0]
+print("molecule plugin entry point: ok")
+PY
 ```
 
-## Verify
+Then send a Canvas message to the external workspace and verify that Hermes
+receives it and its reply appears in Canvas. A peer workspace delegation tests
+the second route. The channel encodes reply routing in the Hermes chat ID:
 
-The agent can now receive messages on the Molecule channel. Send yourself a message from another workspace via the platform's canvas, or have a peer agent delegate a task to your workspace_id. Hermes will dispatch it through the normal message-handling path and reply back through the molecule platform.
-
-## How chat IDs are encoded
-
-The plugin synthesizes hermes chat IDs with a routing prefix:
-
-| chat_id format       | Origin                                    | Reply path           |
-|----------------------|-------------------------------------------|----------------------|
-| `canvas:<ws_id>`     | Canvas user typing in your workspace chat | `send_message_to_user` |
-| `peer:<peer_ws_id>`  | Peer agent A2A message to your workspace  | `delegate_task`        |
-
-The prefix is opaque to the gateway — it just sees a chat_id like any other platform — but the adapter parses it on the way out to pick the right MCP tool.
+| `chat_id` | Origin | Reply tool |
+|---|---|---|
+| `canvas:<workspace_id>` | Canvas user | `send_message_to_user` |
+| `peer:<peer_workspace_id>` | Peer agent | `delegate_task` |
 
 ## Development
+
+Bootstrap `molecules-workspace-runtime==0.4.4` with the split-index commands
+above, then install the checkout and run the suite:
 
 ```bash
 git clone https://git.moleculesai.app/molecule-ai/hermes-channel-molecule.git
 cd hermes-channel-molecule
-pip install -e ".[test]"
-pytest -q
+python3 -m pip install -e ".[test]"
+python3 -m pytest -q
 ```
 
-The integration tests stand up a small fake MCP server (a Python script that speaks JSON-RPC over stdio) so they exercise the real subprocess + handshake + framing code path. No mocking of `asyncio.create_subprocess_exec`.
+Most tests use a fake stdio MCP server to cover framing and routing quickly.
+The real-runtime regression additionally launches
+`molecule_runtime.mcp_cli` against a local HTTP server and proves external
+registration, heartbeat, inbox polling, MCP handshake, and inbound dispatch.
 
 ## License
 

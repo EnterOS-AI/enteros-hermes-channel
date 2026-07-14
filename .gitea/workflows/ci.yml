@@ -23,6 +23,13 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[test]"
+          runtime_download="$(mktemp -d)"
+          trap 'rm -rf "$runtime_download"' EXIT
+          python -m pip download --no-deps --dest "$runtime_download" \
+            --index-url https://git.moleculesai.app/api/packages/molecule-ai/pypi/simple/ \
+            molecules-workspace-runtime==0.4.4
+          python -m pip install --index-url https://pypi.org/simple/ \
+            "$runtime_download"/molecules_workspace_runtime-*.whl
+          python -m pip install -e ".[test]"
       - name: Run tests
         run: pytest -q
