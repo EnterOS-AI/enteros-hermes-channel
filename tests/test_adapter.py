@@ -387,7 +387,7 @@ async def test_real_runtime_entrypoint_starts_external_lifecycle_and_inbox(
 ):
     """The channel must launch the standalone runtime, not its bare MCP loop.
 
-    Runtime 0.4.4's mcp_cli path registers the external workspace, starts a
+    Runtime 0.4.4+'s mcp_cli path registers the external workspace, starts a
     heartbeat, starts the activity poller, then serves MCP over stdio. A fake
     JSON-RPC subprocess cannot prove any of those platform-boundary effects.
     """

@@ -27,7 +27,7 @@ jobs:
           trap 'rm -rf "$runtime_download"' EXIT
           python -m pip download --no-deps --dest "$runtime_download" \
             --index-url https://git.moleculesai.app/api/packages/molecule-ai/pypi/simple/ \
-            molecules-workspace-runtime==0.4.4
+            molecules-workspace-runtime==0.4.26
           python -m pip install --index-url https://pypi.org/simple/ \
             "$runtime_download"/molecules_workspace_runtime-*.whl
           python -m pip install -e ".[test]"
