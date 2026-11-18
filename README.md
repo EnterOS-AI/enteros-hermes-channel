@@ -54,7 +54,7 @@ trap 'rm -rf "$runtime_download"' EXIT
 
 python3 -m pip download --no-deps --dest "$runtime_download" \
   --index-url https://git.moleculesai.app/api/packages/molecule-ai/pypi/simple/ \
-  molecules-workspace-runtime==0.4.26
+  molecules-workspace-runtime==0.4.98
 python3 -m pip install --index-url https://pypi.org/simple/ \
   "$runtime_download"/molecules_workspace_runtime-*.whl
 python3 -m pip install --no-deps \
@@ -158,7 +158,7 @@ the second route. The channel encodes reply routing in the Hermes chat ID:
 
 ## Development
 
-Bootstrap `molecules-workspace-runtime==0.4.26` with the split-index commands
+Bootstrap `molecules-workspace-runtime==0.4.98` with the split-index commands
 above, then install the checkout and run the suite:
 
 ```bash
