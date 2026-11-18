@@ -55,7 +55,7 @@ def test_readme_uses_real_source_and_private_runtime_install_paths() -> None:
     assert "pip install hermes-channel-molecule" not in readme
     assert "git+https://git.moleculesai.app/molecule-ai/hermes-channel-molecule.git" in readme
     assert "pip download --no-deps" in readme
-    assert "molecules-workspace-runtime==0.4.4" in readme
+    assert "molecules-workspace-runtime==0.4.26" in readme
     assert "--index-url https://pypi.org/simple/" in readme
     assert "molecule-ai-workspace-runtime" not in readme
 
